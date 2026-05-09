@@ -1,82 +1,94 @@
-# Rug N' Rope - Customer App 🛍️
+import { NextRequest, NextResponse } from 'next/server';
+import { db } from '@/db';
+import { orders, orderStatusHistory } from '@/db/schema';
+import { eq } from 'drizzle-orm';
+import { getSession } from '@/lib/auth';
 
-Public website for customers: browse products, place orders, track orders.
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const [order] = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, parseInt(id)))
+      .limit(1);
 
----
+    if (!order) {
+      return NextResponse.json(
+        { error: 'Order not found' },
+        { status: 404 }
+      );
+    }
 
-## 🚀 Deploy to Cloudflare Pages (Workers)
+    const history = await db
+      .select()
+      .from(orderStatusHistory)
+      .where(eq(orderStatusHistory.orderId, parseInt(id)));
 
-### Prerequisites
-- [Cloudflare account](https://dash.cloudflare.com)
-- [Neon database](https://neon.tech) (free PostgreSQL, works with Workers)
-- Node.js 20+
+    return NextResponse.json({ order, history });
+  } catch (error) {
+    console.error('Get order error:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch order' },
+      { status: 500 }
+    );
+  }
+}
 
-### Step 1 — Database (Neon)
-1. Create a free account at [neon.tech](https://neon.tech)
-2. Create a new project → copy the **connection string**
-3. It looks like: `postgresql://user:pass@host.neon.tech/dbname?sslmode=require`
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const session = await getSession(request);
+    if (!session) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
 
-### Step 2 — Install & Build
-```bash
-npm install
-npx @cloudflare/next-on-pages
-```
+    const { id } = await params;
+    const body = await request.json();
+    const { status, trackingNotes, ...updateData } = body;
 
-### Step 3 — Cloudflare R2 (for image uploads)
-```bash
-# Create R2 bucket
-wrangler r2 bucket create rug-n-rope-uploads
+    const [updatedOrder] = await db
+      .update(orders)
+      .set({
+        ...updateData,
+        ...(status && { status }),
+        ...(trackingNotes && { trackingNotes }),
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, parseInt(id)))
+      .returning();
 
-# Enable public access in Cloudflare Dashboard:
-# R2 → rug-n-rope-uploads → Settings → Public Access → Allow Access
-# Copy the public URL and set it as R2_PUBLIC_URL
-```
+    if (!updatedOrder) {
+      return NextResponse.json(
+        { error: 'Order not found' },
+        { status: 404 }
+      );
+    }
 
-### Step 4 — Deploy
-```bash
-wrangler pages deploy .vercel/output/static --project-name=rug-n-rope-customer
-```
+    // Add status history if status changed
+    if (status) {
+      await db.insert(orderStatusHistory).values({
+        orderId: parseInt(id),
+        status,
+        notes: trackingNotes || `Status updated to ${status}`,
+        createdBy: session.adminId,
+      });
+    }
 
-### Step 5 — Set Environment Variables
-In Cloudflare Dashboard → Pages → rug-n-rope-customer → Settings → Environment Variables:
-
-| Variable | Value |
-|---|---|
-| `DATABASE_URL` | Your Neon connection string |
-| `JWT_SECRET` | Random 32+ character string |
-| `R2_PUBLIC_URL` | Your R2 public URL |
-| `NEXT_PUBLIC_APP_URL` | `https://rugnrope.com` |
-
-### Step 6 — Initialize Database
-```bash
-# Push schema to Neon
-npx drizzle-kit push
-
-# Initialize with default data (run once after deploy)
-curl -X POST https://rugnrope.com/api/init
-```
-
-### Step 7 — Custom Domain
-Cloudflare Dashboard → Pages → rug-n-rope-customer → Custom Domains → Add `rugnrope.com`
-
----
-
-## 💻 Local Development
-
-```bash
-cp .env.example .env.local
-# Fill in DATABASE_URL and JWT_SECRET
-npm install
-npm run dev
-# → http://localhost:3000
-```
-
----
-
-## 🏗️ Tech Stack
-- **Framework:** Next.js 16 (Edge Runtime)
-- **Database:** PostgreSQL via Neon Serverless
-- **ORM:** Drizzle ORM
-- **Storage:** Cloudflare R2
-- **Styling:** Tailwind CSS v4
-- **Auth:** JWT (jose)
+    return NextResponse.json({ order: updatedOrder });
+  } catch (error) {
+    console.error('Update order error:', error);
+    return NextResponse.json(
+      { error: 'Failed to update order' },
+      { status: 500 }
+    );
+  }
+}
